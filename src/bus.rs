@@ -1,21 +1,21 @@
+use crate::atomic_mutex::AtomicMutex;
+use crate::endpoint::{calculate_count_rx, Endpoint, EndpointStatus, NUM_ENDPOINTS};
 use bare_metal::Mutex;
 use core::cell::RefCell;
 use core::mem;
-use usb_device::{Result, UsbDirection, UsbError};
-use usb_device::bus::{UsbBusAllocator, PollResult};
-use usb_device::endpoint::{EndpointType, EndpointAddress};
 use cortex_m::asm::delay;
 use cortex_m::interrupt;
+use stm32f1xx_hal::gpio::{self, gpiob};
 use stm32f1xx_hal::prelude::*;
 use stm32f1xx_hal::rcc;
-use stm32f1xx_hal::gpio::{self, gpioa};
-use stm32f1xx_hal::stm32::{USB, RCC};
-use crate::atomic_mutex::AtomicMutex;
-use crate::endpoint::{NUM_ENDPOINTS, Endpoint, EndpointStatus, calculate_count_rx};
+use stm32f1xx_hal::stm32::{RCC, USB};
+use usb_device::bus::{PollResult, UsbBusAllocator};
+use usb_device::endpoint::{EndpointAddress, EndpointType};
+use usb_device::{Result, UsbDirection, UsbError};
 
 struct Reset {
     delay: u32,
-    pin: Mutex<RefCell<gpioa::PA12<gpio::Output<gpio::PushPull>>>>,
+    pin: Mutex<RefCell<gpiob::PB9<gpio::Output<gpio::OpenDrain>>>>,
 }
 
 /// USB peripheral driver for STM32F103 microcontrollers.
@@ -66,16 +66,17 @@ impl UsbBus {
         regs: USB,
         apb1: &mut rcc::APB1,
         clocks: &rcc::Clocks,
-        crh: &mut gpioa::CRH,
-        pa12: gpioa::PA12<M>) -> UsbBusAllocator<Self>
-    {
+        crh: &mut gpiob::CRH,
+        pb9: gpiob::PB9<M>,
+    ) -> UsbBusAllocator<Self> {
         UsbBus::new(
             regs,
             apb1,
             Some(Reset {
                 delay: clocks.sysclk().0,
-                pin: Mutex::new(RefCell::new(pa12.into_push_pull_output(crh))),
-            }))
+                pin: Mutex::new(RefCell::new(pb9.into_open_drain_output(crh))),
+            }),
+        )
     }
 
     fn alloc_ep_mem(next_ep_mem: &mut usize, size: usize) -> Result<usize> {
@@ -324,18 +325,21 @@ impl usb_device::bus::UsbBus for UsbBus {
         interrupt::free(|cs| {
             let regs = self.regs.lock(cs);
 
+            // FIXME trait impl for various pins, see https://git.jeelabs.org/jcw/embello/src/commit/c22ce872cdaf4a221d4fcbf33b9fc56b89467494/explore/1608-forth/suf
+
             match self.reset {
                 Some(ref reset) => {
                     let pdwn = regs.cntr.read().pdwn().bit_is_set();
                     regs.cntr.modify(|_, w| w.pdwn().set_bit());
 
-                    reset.pin.borrow(cs).borrow_mut().set_low();
+                    reset.pin.borrow(cs).borrow_mut().set_high();
                     delay(reset.delay);
+                    reset.pin.borrow(cs).borrow_mut().set_low();
 
                     regs.cntr.modify(|_, w| w.pdwn().bit(pdwn));
 
                     Ok(())
-                },
+                }
                 None => Err(UsbError::Unsupported),
             }
         })
